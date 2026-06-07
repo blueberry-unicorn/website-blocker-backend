@@ -1,25 +1,36 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import declarative_base, sessionmaker
-
-DATABASE_URL = "sqlite:///./focus.db"  # You can switch this to a different DB later (PostgreSQL, etc.)
-
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False}  # Needed for SQLite concurrency
-)
-
-SessionLocal = sessionmaker(
-    autocommit=False,
-    autoflush=False,
-    bind=engine
-)
-
-Base = declarative_base()
-
-# Dependency to yield DB session
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+from database import Base
+ 
+ 
+class User(Base):
+    __tablename__ = "users"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String)
+    email = Column(String, unique=True)
+    password = Column(String)
+ 
+    websites = relationship("BlockedWebsite", back_populates="user")
+    focus_sessions = relationship("FocusSession", back_populates="user")
+ 
+ 
+class BlockedWebsite(Base):
+    __tablename__ = "blocked_websites"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    website = Column(String)
+    user_id = Column(Integer, ForeignKey("users.id"))
+ 
+    user = relationship("User", back_populates="websites")
+ 
+ 
+class FocusSession(Base):
+    __tablename__ = "focus_sessions"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    status = Column(String)
+    user_id = Column(Integer, ForeignKey("users.id"))
+ 
+    user = relationship("User", back_populates="focus_sessions")
+ 
