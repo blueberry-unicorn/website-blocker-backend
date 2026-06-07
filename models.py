@@ -1,4 +1,6 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy.orm import relationship
+
 from database import Base
 
 
@@ -10,6 +12,16 @@ class User(Base):
     email = Column(String, unique=True)
     password = Column(String)
 
+    websites = relationship(
+        "BlockedWebsite",
+        back_populates="user"
+    )
+
+    focus_sessions = relationship(
+        "FocusSession",
+        back_populates="user"
+    )
+
 
 class BlockedWebsite(Base):
     __tablename__ = "blocked_websites"
@@ -17,8 +29,30 @@ class BlockedWebsite(Base):
     id = Column(Integer, primary_key=True, index=True)
     website = Column(String)
 
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id")
+    )
+
+    user = relationship(
+        "User",
+        back_populates="websites"
+    )
+
+
 class FocusSession(Base):
     __tablename__ = "focus_sessions"
 
     id = Column(Integer, primary_key=True, index=True)
-    status = Column(String)    
+
+    status = Column(String)
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id")
+    )
+
+    user = relationship(
+        "User",
+        back_populates="focus_sessions"
+    )
