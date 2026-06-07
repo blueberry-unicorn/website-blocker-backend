@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from fastapi import HTTPException
+
 from pydantic import BaseModel
 
 from database import engine
@@ -7,10 +9,15 @@ from database import Base
 
 import models
 
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+
+# ------------------
+# Schemas
+# ------------------
 
 class UserCreate(BaseModel):
     name: str
@@ -18,22 +25,48 @@ class UserCreate(BaseModel):
     password: str
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 class WebsiteCreate(BaseModel):
     website: str
+    user_id: int
+
 
 class FocusCreate(BaseModel):
-    status: str    
+    status: str
+    user_id: int
 
+
+# ------------------
+# Home
+# ------------------
 
 @app.get("/")
 def home():
     return {"message": "Backend Working"}
 
 
+# ------------------
+# Register
+# ------------------
+
 @app.post("/register")
 def register(user: UserCreate):
 
     db = SessionLocal()
+
+    existing_user = db.query(models.User).filter(
+        models.User.email == user.email
+    ).first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=409,
+            detail="Email already registered"
+        )
 
     new_user = models.User(
         name=user.name,
@@ -44,78 +77,211 @@ def register(user: UserCreate):
     db.add(new_user)
     db.commit()
 
-    return {"message": "User Registered Successfully"}
+    return {
+        "message": "User Registered Successfully"
+    }
 
+
+# ------------------
+# Login
+# ------------------
 
 @app.post("/login")
-def login(user: UserCreate):
+def login(user: LoginRequest):
 
     db = SessionLocal()
 
     existing_user = db.query(models.User).filter(
-        models.User.email == user.email,
-        models.User.password == user.password
+        models.User.email == user.email
     ).first()
 
-    if existing_user:
-        return {"message": "Login Successful"}
+    if not existing_user:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Email or Password"
+        )
 
-    return {"message": "Invalid Email or Password"}
+    if existing_user.password != user.password:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Email or Password"
+        )
 
+    return {
+        "message": "Login Successful",
+        "user_id": existing_user.id
+    }
+
+
+# ------------------
+# Add Website
+# ------------------
 
 @app.post("/add-website")
 def add_website(data: WebsiteCreate):
 
     db = SessionLocal()
 
+    user = db.query(models.User).filter(
+        models.User.id == data.user_id
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
     website = models.BlockedWebsite(
-        website=data.website
+        website=data.website,
+        user_id=data.user_id
     )
 
     db.add(website)
     db.commit()
 
-    return {"message": "Website Added Successfully"}
+    return {
+        "message": "Website Added Successfully"
+    }
+
+
+# ------------------
+# Delete Website
+# ------------------
+
+@app.delete("/website/{website_id}")
+def delete_website(website_id: int):
+
+    db = SessionLocal()
+
+    website = db.query(
+        models.BlockedWebsite
+    ).filter(
+        models.BlockedWebsite.id == website_id
+    ).first()
+
+    if not website:
+        raise HTTPException(
+            status_code=404,
+            detail="Website not found"
+        )
+
+    db.delete(website)
+    db.commit()
+
+    return {
+        "message": "Website deleted successfully"
+    }
+
+
+# ------------------
+# Start Focus
+# ------------------
 
 @app.post("/start-focus")
 def start_focus(data: FocusCreate):
 
     db = SessionLocal()
 
+    user = db.query(models.User).filter(
+        models.User.id == data.user_id
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="User not found"
+        )
+
     session = models.FocusSession(
-        status=data.status
+        status="ACTIVE",
+        user_id=data.user_id
     )
 
     db.add(session)
     db.commit()
 
-    return {"message": "Focus Session Started"}    
+    return {
+        "message": "Focus Session Started"
+    }
+
+
+# ------------------
+# Stop Focus
+# ------------------
+
+@app.post("/stop-focus")
+def stop_focus(user_id: int):
+
+    db = SessionLocal()
+
+    session = db.query(
+        models.FocusSession
+    ).filter(
+        models.FocusSession.user_id == user_id,
+        models.FocusSession.status == "ACTIVE"
+    ).first()
+
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail="No active focus session"
+        )
+
+    session.status = "STOPPED"
+
+    db.commit()
+
+    return {
+        "message": "Focus Session Stopped"
+    }
+
+
+# ------------------
+# Get Users
+# ------------------
 
 @app.get("/users")
 def get_users():
 
     db = SessionLocal()
 
-    users = db.query(models.User).all()
-
-    return users
+    return db.query(models.User).all()
 
 
-@app.get("/websites")
-def get_websites():
+# ------------------
+# Get User Websites
+# ------------------
+
+@app.get("/websites/{user_id}")
+def get_websites(user_id: int):
 
     db = SessionLocal()
 
-    websites = db.query(models.BlockedWebsite).all()
+    websites = db.query(
+        models.BlockedWebsite
+    ).filter(
+        models.BlockedWebsite.user_id == user_id
+    ).all()
 
     return websites
 
 
-@app.get("/focus-sessions")
-def get_focus_sessions():
+# ------------------
+# Get User Focus History
+# ------------------
+
+@app.get("/focus-sessions/{user_id}")
+def get_focus_sessions(user_id: int):
 
     db = SessionLocal()
 
-    sessions = db.query(models.FocusSession).all()
+    sessions = db.query(
+        models.FocusSession
+    ).filter(
+        models.FocusSession.user_id == user_id
+    ).all()
 
-    return sessions    
+    return sessions
+
+    
