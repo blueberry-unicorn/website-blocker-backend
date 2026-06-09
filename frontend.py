@@ -2,18 +2,14 @@ import customtkinter as ctk
 import requests
 import threading
 import subprocess
-import platform
 import os
+import tempfile
 
 # ──────────────────────────────────────────────
 # CONFIG
 # ──────────────────────────────────────────────
 API_BASE = "https://website-blocker-backend-production.up.railway.app"
-
-HOSTS_FILE = (
-    r"C:\Windows\System32\drivers\etc\hosts" if platform.system() == "Windows"
-    else "/etc/hosts"
-)
+HOSTS_FILE = "/etc/hosts"
 REDIRECT_IP = "127.0.0.1"
 
 ctk.set_appearance_mode("dark")
@@ -21,73 +17,74 @@ ctk.set_default_color_theme("blue")
 
 
 # ──────────────────────────────────────────────
-# HOSTS FILE HELPERS
+# BLOCKING HELPERS - uses osascript for admin
 # ──────────────────────────────────────────────
-def flush_dns():
-    """Flush DNS cache on Mac."""
-    try:
-        subprocess.run(["dscacheutil", "-flushcache"], check=False)
-        subprocess.run(["killall", "-HUP", "mDNSResponder"], check=False)
-    except Exception:
-        pass
+def run_as_admin(bash_command: str):
+    """Run a shell command with admin privileges using osascript."""
+    escaped = bash_command.replace('"', '\\"')
+    apple_script = f'do shell script "{escaped}" with administrator privileges'
+    subprocess.run(["osascript", "-e", apple_script], capture_output=True)
 
 
 def block_website_locally(website: str):
-    """Add website to hosts file."""
+    """Block a website by adding to hosts file."""
     try:
-        websites_to_block = [
-            website,
-            f"www.{website}" if not website.startswith("www.") else website
-        ]
+        # Read current hosts
         with open(HOSTS_FILE, "r") as f:
             content = f.read()
 
-        with open(HOSTS_FILE, "a") as f:
-            for site in websites_to_block:
-                entry = f"{REDIRECT_IP} {site}"
-                if entry not in content:
-                    f.write(f"\n{entry}")
+        lines_to_add = []
+        for site in [website, f"www.{website}"]:
+            entry = f"{REDIRECT_IP} {site}"
+            if entry not in content:
+                lines_to_add.append(entry)
 
-        flush_dns()
-    except PermissionError:
-        # Try with sudo
-        try:
-            for site in [website, f"www.{website}"]:
-                entry = f"{REDIRECT_IP} {site}"
-                subprocess.run(
-                    ["sudo", "sh", "-c", f'echo "{entry}" >> {HOSTS_FILE}'],
-                    check=False
-                )
-            subprocess.run(["sudo", "dscacheutil", "-flushcache"], check=False)
-            subprocess.run(["sudo", "killall", "-HUP", "mDNSResponder"], check=False)
-        except Exception:
-            pass
-    except Exception:
-        pass
+        if not lines_to_add:
+            return  # Already blocked
+
+        # Write to a temp file
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        for line in lines_to_add:
+            tmp.write(line + "\n")
+        tmp.close()
+
+        # Append temp file to hosts using osascript admin
+        cmd = f"cat {tmp.name} >> /etc/hosts && dscacheutil -flushcache && killall -HUP mDNSResponder"
+        run_as_admin(cmd)
+        os.unlink(tmp.name)
+
+    except Exception as e:
+        print(f"Block error: {e}")
 
 
 def unblock_all_locally(websites: list):
-    """Remove all blocked websites from hosts file."""
+    """Remove blocked websites from hosts file."""
     try:
         with open(HOSTS_FILE, "r") as f:
             lines = f.readlines()
 
         new_lines = []
         for line in lines:
-            should_remove = False
+            should_keep = True
             for site in websites:
                 if site in line or f"www.{site}" in line:
-                    should_remove = True
+                    should_keep = False
                     break
-            if not should_remove:
+            if should_keep:
                 new_lines.append(line)
 
-        with open(HOSTS_FILE, "w") as f:
-            f.writelines(new_lines)
+        # Write new content to temp file
+        tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False)
+        tmp.writelines(new_lines)
+        tmp.close()
 
-        flush_dns()
-    except Exception:
-        pass
+        # Replace hosts file using osascript admin
+        cmd = f"cp {tmp.name} /etc/hosts && dscacheutil -flushcache && killall -HUP mDNSResponder"
+        run_as_admin(cmd)
+        os.unlink(tmp.name)
+
+    except Exception as e:
+        print(f"Unblock error: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -106,24 +103,26 @@ class AuthScreen(ctk.CTk):
         self._build_ui()
 
     def _build_ui(self):
-        ctk.CTkLabel(self, text="🛡️ FocusSpace", font=ctk.CTkFont(size=28, weight="bold")).pack(pady=(40, 5))
-        ctk.CTkLabel(self, text="Your personal focus companion", text_color="gray").pack(pady=(0, 30))
+        ctk.CTkLabel(self, text="🛡️ FocusSpace",
+                     font=ctk.CTkFont(size=28, weight="bold")).pack(pady=(40, 5))
+        ctk.CTkLabel(self, text="Your personal focus companion",
+                     text_color="gray").pack(pady=(0, 30))
 
         self.card = ctk.CTkFrame(self)
         self.card.pack(padx=40, fill="x")
 
-        self.tab_frame = ctk.CTkFrame(self.card, fg_color="transparent")
-        self.tab_frame.pack(fill="x", padx=20, pady=(20, 10))
+        tab_frame = ctk.CTkFrame(self.card, fg_color="transparent")
+        tab_frame.pack(fill="x", padx=20, pady=(20, 10))
 
         self.login_tab = ctk.CTkButton(
-            self.tab_frame, text="Login",
+            tab_frame, text="Login",
             command=lambda: self._switch_mode("login"),
             fg_color="#3498db", width=120
         )
         self.login_tab.pack(side="left", padx=(0, 10))
 
         self.register_tab = ctk.CTkButton(
-            self.tab_frame, text="Register",
+            tab_frame, text="Register",
             command=lambda: self._switch_mode("register"),
             fg_color="transparent", width=120
         )
@@ -134,7 +133,8 @@ class AuthScreen(ctk.CTk):
         self.email_entry = ctk.CTkEntry(self.card, placeholder_text="Email", height=40)
         self.email_entry.pack(padx=20, pady=(10, 8), fill="x")
 
-        self.password_entry = ctk.CTkEntry(self.card, placeholder_text="Password", show="*", height=40)
+        self.password_entry = ctk.CTkEntry(self.card, placeholder_text="Password",
+                                            show="*", height=40)
         self.password_entry.pack(padx=20, pady=(0, 8), fill="x")
 
         self.status_label = ctk.CTkLabel(self.card, text="", text_color="red")
@@ -149,8 +149,8 @@ class AuthScreen(ctk.CTk):
     def _switch_mode(self, mode: str):
         self.mode = mode
         if mode == "register":
-            self.name_entry.pack(in_=self.card, padx=20, pady=(10, 8), fill="x",
-                                  before=self.email_entry)
+            self.name_entry.pack(in_=self.card, padx=20, pady=(10, 8),
+                                  fill="x", before=self.email_entry)
             self.login_tab.configure(fg_color="transparent")
             self.register_tab.configure(fg_color="#3498db")
             self.submit_btn.configure(text="Create Account")
@@ -175,9 +175,9 @@ class AuthScreen(ctk.CTk):
         def do_request():
             try:
                 if self.mode == "login":
-                    resp = requests.post(f"{API_BASE}/login", json={
-                        "email": email, "password": password
-                    }, timeout=10)
+                    resp = requests.post(f"{API_BASE}/login",
+                                         json={"email": email, "password": password},
+                                         timeout=10)
                     if resp.status_code == 200:
                         user_id = resp.json().get("user_id")
                         self.after(0, lambda: self._on_success(user_id))
@@ -189,9 +189,10 @@ class AuthScreen(ctk.CTk):
                     if not name:
                         self.after(0, lambda: self._on_error("Please enter your name."))
                         return
-                    resp = requests.post(f"{API_BASE}/register", json={
-                        "name": name, "email": email, "password": password
-                    }, timeout=10)
+                    resp = requests.post(f"{API_BASE}/register",
+                                         json={"name": name, "email": email,
+                                               "password": password},
+                                         timeout=10)
                     if resp.status_code == 200:
                         self.after(0, lambda: self.status_label.configure(
                             text="Account created! Please login.", text_color="green"))
@@ -210,10 +211,10 @@ class AuthScreen(ctk.CTk):
         self.user_id = user_id
         self.destroy()
 
-    def _on_error(self, message, color="red"):
-        self.status_label.configure(text=message, text_color=color)
-        self.submit_btn.configure(state="normal",
-                                   text="Login" if self.mode == "login" else "Create Account")
+    def _on_error(self, message):
+        self.status_label.configure(text=message, text_color="red")
+        label = "Login" if self.mode == "login" else "Create Account"
+        self.submit_btn.configure(state="normal", text=label)
 
 
 # ──────────────────────────────────────────────
@@ -238,28 +239,27 @@ class Dashboard(ctk.CTk):
         self._load_websites()
 
     def _build_sidebar(self):
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_propagate(False)
+        sb = ctk.CTkFrame(self, width=200, corner_radius=0)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
 
-        ctk.CTkLabel(
-            self.sidebar, text="🛡️ FocusSpace",
-            font=ctk.CTkFont(size=22, weight="bold")
-        ).grid(row=0, column=0, padx=20, pady=(20, 30))
+        ctk.CTkLabel(sb, text="🛡️ FocusSpace",
+                     font=ctk.CTkFont(size=22, weight="bold")
+                     ).grid(row=0, column=0, padx=20, pady=(20, 30))
 
-        ctk.CTkButton(self.sidebar, text="Dashboard", fg_color="transparent", anchor="w"
+        ctk.CTkButton(sb, text="Dashboard", fg_color="transparent", anchor="w"
                       ).grid(row=1, column=0, padx=20, pady=10, sticky="ew")
 
-        ctk.CTkButton(self.sidebar, text="Analytics", fg_color="transparent", anchor="w"
+        ctk.CTkButton(sb, text="Analytics", fg_color="transparent", anchor="w"
                       ).grid(row=2, column=0, padx=20, pady=10, sticky="ew")
 
-        self.sidebar.grid_rowconfigure(4, weight=1)
+        sb.grid_rowconfigure(4, weight=1)
 
-        ctk.CTkLabel(self.sidebar, text="Appearance:", anchor="w"
+        ctk.CTkLabel(sb, text="Appearance:", anchor="w"
                      ).grid(row=5, column=0, padx=20, pady=(10, 0))
 
         ctk.CTkOptionMenu(
-            self.sidebar, values=["Dark", "Light", "System"],
+            sb, values=["Dark", "Light", "System"],
             command=lambda v: ctk.set_appearance_mode(v)
         ).grid(row=6, column=0, padx=20, pady=(10, 20))
 
@@ -268,17 +268,17 @@ class Dashboard(ctk.CTk):
         self.main.grid(row=0, column=1, sticky="nsew", padx=30, pady=20)
         self.main.grid_columnconfigure((0, 1), weight=1)
 
-        ctk.CTkLabel(
-            self.main, text="Welcome Back 👋",
-            font=ctk.CTkFont(size=26, weight="bold")
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 20))
+        ctk.CTkLabel(self.main, text="Welcome Back 👋",
+                     font=ctk.CTkFont(size=26, weight="bold")
+                     ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 20))
 
         # Card 1 – Session Controller
         ctrl = ctk.CTkFrame(self.main)
         ctrl.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
 
         ctk.CTkLabel(ctrl, text="Session Controller",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=15, padx=15, anchor="w")
+                     font=ctk.CTkFont(size=16, weight="bold")
+                     ).pack(pady=15, padx=15, anchor="w")
 
         self.session_btn = ctk.CTkButton(
             ctrl, text="▶ Activate Blocklist",
@@ -287,7 +287,8 @@ class Dashboard(ctk.CTk):
         )
         self.session_btn.pack(pady=20, padx=20, fill="x")
 
-        self.session_status = ctk.CTkLabel(ctrl, text="Session: Inactive", text_color="gray")
+        self.session_status = ctk.CTkLabel(ctrl, text="Session: Inactive",
+                                            text_color="gray")
         self.session_status.pack(pady=(0, 15))
 
         # Card 2 – Focus Score
@@ -295,33 +296,38 @@ class Dashboard(ctk.CTk):
         metric.grid(row=1, column=1, padx=10, pady=10, sticky="nsew")
 
         ctk.CTkLabel(metric, text="Daily Progress",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=15, padx=15, anchor="w")
+                     font=ctk.CTkFont(size=16, weight="bold")
+                     ).pack(pady=15, padx=15, anchor="w")
 
         ctk.CTkLabel(metric, text="85%",
                      font=ctk.CTkFont(size=48, weight="bold"),
                      text_color="#2ecc71").pack(pady=5)
 
-        ctk.CTkLabel(metric, text="Focus Score Today", text_color="gray").pack(pady=(0, 15))
+        ctk.CTkLabel(metric, text="Focus Score Today",
+                     text_color="gray").pack(pady=(0, 15))
 
         # Card 3 – Blocked Websites
         list_card = ctk.CTkFrame(self.main)
         list_card.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="nsew")
 
         ctk.CTkLabel(list_card, text="Distraction Rules",
-                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10, padx=15, anchor="w")
+                     font=ctk.CTkFont(size=16, weight="bold")
+                     ).pack(pady=10, padx=15, anchor="w")
 
         entry_row = ctk.CTkFrame(list_card, fg_color="transparent")
         entry_row.pack(fill="x", padx=15, pady=5)
 
         self.url_entry = ctk.CTkEntry(
-            entry_row, placeholder_text="Enter website URL (e.g., youtube.com)"
+            entry_row,
+            placeholder_text="Enter website URL (e.g., youtube.com)"
         )
         self.url_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
         ctk.CTkButton(entry_row, text="Add", width=80,
                       command=self._add_website).pack(side="right")
 
-        self.sites_label = ctk.CTkLabel(list_card, text="Blocked sites: None", text_color="gray")
+        self.sites_label = ctk.CTkLabel(list_card, text="Blocked sites: None",
+                                         text_color="gray")
         self.sites_label.pack(pady=(5, 15), padx=15, anchor="w")
 
         self.api_status = ctk.CTkLabel(self.main, text="", text_color="gray",
@@ -339,21 +345,25 @@ class Dashboard(ctk.CTk):
                     }, timeout=10)
                     if resp.status_code == 200:
                         self.session_active = True
+                        # Block all sites — this will trigger Mac password popup
                         for site in self.blocked_sites:
                             block_website_locally(site)
                         self.after(0, self._update_session_ui)
                     else:
-                        self.after(0, lambda: self._set_status("Failed to start session.", "red"))
+                        self.after(0, lambda: self._set_status(
+                            "Failed to start session.", "red"))
                 else:
                     resp = requests.post(
-                        f"{API_BASE}/stop-focus?user_id={self.user_id}", timeout=10
+                        f"{API_BASE}/stop-focus?user_id={self.user_id}",
+                        timeout=10
                     )
                     if resp.status_code == 200:
                         self.session_active = False
                         unblock_all_locally(self.blocked_sites)
                         self.after(0, self._update_session_ui)
                     else:
-                        self.after(0, lambda: self._set_status("Failed to stop session.", "red"))
+                        self.after(0, lambda: self._set_status(
+                            "Failed to stop session.", "red"))
             except Exception as e:
                 self.after(0, lambda: self._set_status(f"Error: {e}", "red"))
             finally:
@@ -363,12 +373,17 @@ class Dashboard(ctk.CTk):
 
     def _update_session_ui(self):
         if self.session_active:
-            self.session_btn.configure(text="⏹ Deactivate Blocklist", fg_color="#e74c3c")
-            self.session_status.configure(text="Session: ACTIVE 🔴", text_color="#e74c3c")
-            self._set_status("Focus session started! Sites blocked. Use Chrome to test.", "green")
+            self.session_btn.configure(text="⏹ Deactivate Blocklist",
+                                        fg_color="#e74c3c")
+            self.session_status.configure(text="Session: ACTIVE 🔴",
+                                           text_color="#e74c3c")
+            self._set_status(
+                "Focus session started! Sites blocked. Test in Chrome.", "green")
         else:
-            self.session_btn.configure(text="▶ Activate Blocklist", fg_color="#3498db")
-            self.session_status.configure(text="Session: Inactive", text_color="gray")
+            self.session_btn.configure(text="▶ Activate Blocklist",
+                                        fg_color="#3498db")
+            self.session_status.configure(text="Session: Inactive",
+                                           text_color="gray")
             self._set_status("Session stopped. Sites unblocked.", "gray")
 
     def _add_website(self):
@@ -389,9 +404,11 @@ class Dashboard(ctk.CTk):
                     if self.session_active:
                         block_website_locally(website)
                     self.after(0, self._update_sites_label)
-                    self.after(0, lambda: self._set_status(f"Added {website} ✓", "green"))
+                    self.after(0, lambda: self._set_status(
+                        f"Added {website} ✓", "green"))
                 else:
-                    self.after(0, lambda: self._set_status("Failed to add website.", "red"))
+                    self.after(0, lambda: self._set_status(
+                        "Failed to add website.", "red"))
             except Exception as e:
                 self.after(0, lambda: self._set_status(f"Error: {e}", "red"))
 
@@ -400,7 +417,8 @@ class Dashboard(ctk.CTk):
     def _load_websites(self):
         def do_load():
             try:
-                resp = requests.get(f"{API_BASE}/websites/{self.user_id}", timeout=10)
+                resp = requests.get(f"{API_BASE}/websites/{self.user_id}",
+                                     timeout=10)
                 if resp.status_code == 200:
                     sites = [w["website"] for w in resp.json()]
                     self.blocked_sites = sites
